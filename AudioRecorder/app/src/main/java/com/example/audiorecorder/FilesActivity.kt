@@ -1,0 +1,271 @@
+package com.example.audiorecorder
+
+import android.media.MediaMetadataRetriever
+import android.media.MediaPlayer
+import android.os.*
+import android.widget.*
+import androidx.appcompat.app.AlertDialog
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.FileProvider
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import android.content.Intent
+import android.view.*
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.*
+
+class FilesActivity : AppCompatActivity() {
+
+    private lateinit var recycler: RecyclerView
+    private lateinit var tvEmpty: TextView
+    private lateinit var tvTotalSize: TextView
+    private var adapter: RecordingAdapter? = null
+
+    private var player: MediaPlayer? = null
+    private var currentlyPlayingPath: String? = null
+    private val handler = Handler(Looper.getMainLooper())
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_files)
+
+        supportActionBar?.apply {
+            title = "My Recordings"
+            setDisplayHomeAsUpEnabled(true)
+        }
+
+        recycler      = findViewById(R.id.recycler)
+        tvEmpty       = findViewById(R.id.tvEmpty)
+        tvTotalSize   = findViewById(R.id.tvTotalSize)
+
+        recycler.layoutManager = LinearLayoutManager(this)
+        loadFiles()
+    }
+
+    private fun getRecordingsDir(): File {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            File(getExternalFilesDir(Environment.DIRECTORY_MUSIC), "AudioRecorder")
+        } else {
+            File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC),
+                "AudioRecorder"
+            )
+        }.also { if (!it.exists()) it.mkdirs() }
+    }
+
+    private fun loadFiles() {
+        val dir = getRecordingsDir()
+        val files = dir.listFiles { f -> f.extension == "m4a" }
+            ?.sortedByDescending { it.lastModified() }
+            ?: emptyList()
+
+        if (files.isEmpty()) {
+            recycler.visibility  = View.GONE
+            tvEmpty.visibility   = View.VISIBLE
+            tvTotalSize.text     = "No recordings yet"
+        } else {
+            recycler.visibility  = View.VISIBLE
+            tvEmpty.visibility   = View.GONE
+
+            val totalBytes = files.sumOf { it.length() }
+            tvTotalSize.text = "${files.size} recording${if (files.size != 1) "s" else ""}  •  ${formatSize(totalBytes)}"
+
+            adapter = RecordingAdapter(
+                files.toMutableList(),
+                onPlay   = { file, seekBar, tvTime, btn -> togglePlayback(file, seekBar, tvTime, btn) },
+                onDelete = { file, pos -> confirmDelete(file, pos) },
+                onShare  = { file -> shareFile(file) }
+            )
+            recycler.adapter = adapter
+        }
+    }
+
+    // ── Playback ────────────────────────────────────────────────────────────
+
+    private fun togglePlayback(
+        file: File,
+        seekBar: SeekBar,
+        tvTime: TextView,
+        btnPlay: ImageButton
+    ) {
+        if (currentlyPlayingPath == file.absolutePath && player?.isPlaying == true) {
+            // Pause
+            player?.pause()
+            btnPlay.setImageResource(android.R.drawable.ic_media_play)
+            handler.removeCallbacksAndMessages(null)
+            return
+        }
+
+        // Stop any existing playback
+        stopPlayback()
+
+        currentlyPlayingPath = file.absolutePath
+        player = MediaPlayer().apply {
+            setDataSource(file.absolutePath)
+            prepare()
+            start()
+        }
+
+        btnPlay.setImageResource(android.R.drawable.ic_media_pause)
+        seekBar.max = player!!.duration
+
+        // Progress ticker
+        val tick = object : Runnable {
+            override fun run() {
+                try {
+                    val p = player ?: return
+                    if (!p.isPlaying) return
+                    seekBar.progress = p.currentPosition
+                    tvTime.text = "${formatMs(p.currentPosition)} / ${formatMs(p.duration)}"
+                    handler.postDelayed(this, 500)
+                } catch (_: Exception) {}
+            }
+        }
+        handler.post(tick)
+
+        // Seek
+        seekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar, progress: Int, fromUser: Boolean) {
+                if (fromUser) player?.seekTo(progress)
+            }
+            override fun onStartTrackingTouch(sb: SeekBar) {}
+            override fun onStopTrackingTouch(sb: SeekBar) {}
+        })
+
+        player!!.setOnCompletionListener {
+            btnPlay.setImageResource(android.R.drawable.ic_media_play)
+            seekBar.progress = 0
+            tvTime.text = "00:00 / ${formatMs(player?.duration ?: 0)}"
+            handler.removeCallbacksAndMessages(null)
+            currentlyPlayingPath = null
+        }
+    }
+
+    private fun stopPlayback() {
+        handler.removeCallbacksAndMessages(null)
+        try { player?.stop() } catch (_: Exception) {}
+        player?.release()
+        player = null
+        currentlyPlayingPath = null
+    }
+
+    // ── Delete ───────────────────────────────────────────────────────────────
+
+    private fun confirmDelete(file: File, position: Int) {
+        if (currentlyPlayingPath == file.absolutePath) stopPlayback()
+
+        AlertDialog.Builder(this, R.style.DarkDialog)
+            .setTitle("Delete recording?")
+            .setMessage(file.name)
+            .setPositiveButton("Delete") { _, _ ->
+                file.delete()
+                adapter?.removeAt(position)
+                loadFiles() // refresh totals
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    // ── Share ────────────────────────────────────────────────────────────────
+
+    private fun shareFile(file: File) {
+        val uri = FileProvider.getUriForFile(
+            this,
+            "${packageName}.fileprovider",
+            file
+        )
+        startActivity(Intent.createChooser(
+            Intent(Intent.ACTION_SEND).apply {
+                type = "audio/mp4"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }, "Share recording"
+        ))
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    private fun formatMs(ms: Int): String {
+        val s = ms / 1000
+        return "%02d:%02d".format(s / 60, s % 60)
+    }
+
+    private fun formatSize(bytes: Long): String = when {
+        bytes >= 1_000_000 -> "%.1f MB".format(bytes / 1_000_000.0)
+        bytes >= 1_000     -> "%.0f KB".format(bytes / 1_000.0)
+        else               -> "$bytes B"
+    }
+
+    override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        if (item.itemId == android.R.id.home) { finish(); return true }
+        return super.onOptionsItemSelected(item)
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        stopPlayback()
+    }
+}
+
+// ── Adapter ──────────────────────────────────────────────────────────────────
+
+class RecordingAdapter(
+    private val files: MutableList<File>,
+    private val onPlay:   (File, SeekBar, TextView, ImageButton) -> Unit,
+    private val onDelete: (File, Int) -> Unit,
+    private val onShare:  (File) -> Unit
+) : RecyclerView.Adapter<RecordingAdapter.VH>() {
+
+    inner class VH(v: View) : RecyclerView.ViewHolder(v) {
+        val tvName:    TextView    = v.findViewById(R.id.tvFileName)
+        val tvMeta:    TextView    = v.findViewById(R.id.tvMeta)
+        val seekBar:   SeekBar     = v.findViewById(R.id.seekBar)
+        val tvTime:    TextView    = v.findViewById(R.id.tvTime)
+        val btnPlay:   ImageButton = v.findViewById(R.id.btnPlay)
+        val btnShare:  ImageButton = v.findViewById(R.id.btnShare)
+        val btnDelete: ImageButton = v.findViewById(R.id.btnDelete)
+    }
+
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int) =
+        VH(LayoutInflater.from(parent.context).inflate(R.layout.item_recording, parent, false))
+
+    override fun getItemCount() = files.size
+
+    override fun onBindViewHolder(h: VH, position: Int) {
+        val file = files[position]
+        h.tvName.text = file.nameWithoutExtension
+
+        // Duration + size via MediaMetadataRetriever
+        val duration = try {
+            MediaMetadataRetriever().run {
+                setDataSource(file.absolutePath)
+                val ms = extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLong() ?: 0L
+                release()
+                val s = ms / 1000
+                "%02d:%02d".format(s / 60, s % 60)
+            }
+        } catch (_: Exception) { "--:--" }
+
+        val sizeKb = file.length() / 1024
+        val sizeStr = if (sizeKb >= 1024) "%.1f MB".format(sizeKb / 1024.0) else "$sizeKb KB"
+        val date = SimpleDateFormat("dd MMM yyyy  HH:mm", Locale.getDefault())
+            .format(Date(file.lastModified()))
+
+        h.tvMeta.text   = "$duration  •  $sizeStr  •  $date"
+        h.tvTime.text   = "00:00 / $duration"
+        h.seekBar.progress = 0
+
+        h.btnPlay.setImageResource(android.R.drawable.ic_media_play)
+        h.btnPlay.setOnClickListener { onPlay(file, h.seekBar, h.tvTime, h.btnPlay) }
+        h.btnShare.setOnClickListener { onShare(file) }
+        h.btnDelete.setOnClickListener { onDelete(file, h.bindingAdapterPosition) }
+    }
+
+    fun removeAt(position: Int) {
+        if (position in files.indices) {
+            files.removeAt(position)
+            notifyItemRemoved(position)
+        }
+    }
+}

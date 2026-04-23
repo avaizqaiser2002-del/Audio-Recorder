@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Covers Android 10+ app-scoped external files -->
+    <external-files-path name="recordings" path="Music/AudioRecorder/" />
+    <!-- Covers Android 9 and below public Music folder -->
+    <external-path name="recordings_legacy" path="Music/AudioRecorder/" />
+</paths>
