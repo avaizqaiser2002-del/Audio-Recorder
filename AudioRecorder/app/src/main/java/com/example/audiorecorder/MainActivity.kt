@@ -204,8 +204,6 @@ class MainActivity : AppCompatActivity() {
     private fun hasPermissions(): Boolean {
         val required = buildList {
             add(Manifest.permission.RECORD_AUDIO)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
-                add(Manifest.permission.POST_NOTIFICATIONS)
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q)
                 add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
         }
