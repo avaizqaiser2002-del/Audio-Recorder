@@ -259,7 +259,7 @@ class RecordingAdapter(
         h.btnPlay.setImageResource(android.R.drawable.ic_media_play)
         h.btnPlay.setOnClickListener { onPlay(file, h.seekBar, h.tvTime, h.btnPlay) }
         h.btnShare.setOnClickListener { onShare(file) }
-        h.btnDelete.setOnClickListener { onDelete(file, h.absoluteAdapterPosition) }
+        h.btnDelete.setOnClickListener { onDelete(file, h.absoluteAdapterPositiony) }
     }
 
     fun removeAt(position: Int) {
