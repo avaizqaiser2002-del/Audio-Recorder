@@ -11,7 +11,6 @@ import androidx.core.app.NotificationCompat
 class RecordingService : Service() {
 
     companion object {
-        // Intent actions (Service ↔ MainActivity)
         const val ACTION_START             = "com.example.audiorecorder.START"
         const val ACTION_STOP              = "com.example.audiorecorder.STOP"
         const val ACTION_RECORDING_STARTED = "com.example.audiorecorder.RECORDING_STARTED"
@@ -19,7 +18,6 @@ class RecordingService : Service() {
         const val ACTION_RECORDING_STOPPED = "com.example.audiorecorder.RECORDING_STOPPED"
         const val ACTION_ERROR             = "com.example.audiorecorder.ERROR"
 
-        // Intent extras
         const val EXTRA_INTERVAL_MINUTES = "interval_minutes"
         const val EXTRA_QUALITY          = "quality"
         const val EXTRA_CHANNELS         = "channels"
@@ -33,23 +31,17 @@ class RecordingService : Service() {
         private const val TAG        = "RecordingService"
     }
 
-    // --- Recording state ---
     private var recorder: MediaRecorder? = null
     private val handler = Handler(Looper.getMainLooper())
     private var intervalMs  = 20L * 60 * 1000
-    private var quality     = 1   // 0=Low 1=Med 2=High
-    private var channels    = 2   // 1=Mono 2=Stereo
+    private var quality     = 1
+    private var channels    = 2
     private var prefix      = "Recording"
     private var segmentCount = 0
     private var currentFileName = ""
-
-    // WakeLock — keeps CPU alive for long recordings in background
     private var wakeLock: PowerManager.WakeLock? = null
 
-    // Schedules the next segment split
     private val splitRunnable = Runnable { splitRecording() }
-
-    // ─── Lifecycle ───────────────────────────────────────────────────────────
 
     override fun onCreate() {
         super.onCreate()
@@ -67,7 +59,9 @@ class RecordingService : Service() {
                 prefix       = intent.getStringExtra(EXTRA_PREFIX) ?: "Recording"
                 segmentCount = 0
 
-                launchForeground()
+                // Try to launch as foreground service — but don't die if it fails
+                // (Realme/ColorOS blocks notifications for sideloaded APKs)
+                tryLaunchForeground()
                 acquireWakeLock()
                 startSegment()
             }
@@ -86,7 +80,7 @@ class RecordingService : Service() {
         stopEverything()
     }
 
-    // ─── Core recording logic ─────────────────────────────────────────────────
+    // ── Core recording ────────────────────────────────────────────────────────
 
     private fun startSegment() {
         releaseRecorder()
@@ -110,9 +104,9 @@ class RecordingService : Service() {
                 setOutputFile(filePath)
 
                 when (quality) {
-                    0 -> { setAudioSamplingRate(22050); setAudioEncodingBitRate(32_000) }   // Low
-                    1 -> { setAudioSamplingRate(44100); setAudioEncodingBitRate(96_000) }   // Medium
-                    2 -> { setAudioSamplingRate(44100); setAudioEncodingBitRate(192_000) }  // High
+                    0 -> { setAudioSamplingRate(22050); setAudioEncodingBitRate(32_000) }
+                    1 -> { setAudioSamplingRate(44100); setAudioEncodingBitRate(96_000) }
+                    2 -> { setAudioSamplingRate(44100); setAudioEncodingBitRate(192_000) }
                 }
 
                 prepare()
@@ -121,8 +115,9 @@ class RecordingService : Service() {
 
             segmentCount++
             Log.i(TAG, "Segment $segmentCount started → $filePath")
-            updateNotification("Segment $segmentCount | splits every ${intervalMs / 60_000} min")
+            tryUpdateNotification("Segment $segmentCount | splits every ${intervalMs / 60_000} min")
 
+            // Broadcast success so MainActivity can toggle the button
             sendBroadcast(Intent(ACTION_RECORDING_STARTED).apply {
                 putExtra(EXTRA_FILE_NAME, fileName)
                 putExtra(EXTRA_FILE_COUNT, segmentCount)
@@ -138,14 +133,8 @@ class RecordingService : Service() {
 
     private fun splitRecording() {
         Log.i(TAG, "Splitting → starting segment ${segmentCount + 1}")
-        releaseRecorder()  // saves current file cleanly
-
-        val savedName = currentFileName
-        val savedCount = segmentCount
-
-        startSegment()  // starts next segment (increments segmentCount inside)
-
-        // Notify UI that previous segment was saved
+        releaseRecorder()
+        startSegment()
         sendBroadcast(Intent(ACTION_SEGMENT_SAVED).apply {
             putExtra(EXTRA_FILE_NAME, currentFileName)
             putExtra(EXTRA_FILE_COUNT, segmentCount)
@@ -161,33 +150,17 @@ class RecordingService : Service() {
     }
 
     private fun releaseRecorder() {
-        try {
-            recorder?.stop()
-        } catch (e: Exception) {
-            Log.w(TAG, "stop() threw: ${e.message}")
-        }
-        try {
-            recorder?.reset()
-            recorder?.release()
-        } catch (e: Exception) {
-            Log.w(TAG, "release() threw: ${e.message}")
-        }
+        try { recorder?.stop() } catch (e: Exception) { Log.w(TAG, "stop(): ${e.message}") }
+        try { recorder?.reset(); recorder?.release() } catch (e: Exception) { Log.w(TAG, "release(): ${e.message}") }
         recorder = null
     }
 
-    // ─── File path helpers ────────────────────────────────────────────────────
+    // ── File helpers ──────────────────────────────────────────────────────────
 
-    /**
-     * Returns the absolute file path for a new segment.
-     * API 29+: uses app-scoped external Music dir (no permission needed, accessible via Files app).
-     * API < 29: uses public Music directory (requires WRITE_EXTERNAL_STORAGE).
-     */
     private fun getOutputPath(fileName: String): String {
         val dir = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            // /storage/emulated/0/Android/data/com.example.audiorecorder/files/Music/AudioRecorder/
             java.io.File(getExternalFilesDir(Environment.DIRECTORY_MUSIC), "AudioRecorder")
         } else {
-            // /storage/emulated/0/Music/AudioRecorder/
             java.io.File(
                 Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC),
                 "AudioRecorder"
@@ -203,42 +176,51 @@ class RecordingService : Service() {
         return "${prefix}_${ts}.m4a"
     }
 
-    // ─── Notification ─────────────────────────────────────────────────────────
+    // ── Foreground / notification — all wrapped in try-catch ─────────────────
+    // Realme UI (ColorOS) blocks notifications for sideloaded APKs,
+    // which can cause startForeground() to throw. We catch and continue
+    // so recording still works even without the status bar notification.
 
-    private fun launchForeground() {
-        val notif = buildNotification("Starting…")
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIF_ID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
-        } else {
-            startForeground(NOTIF_ID, notif)
+    private fun tryLaunchForeground() {
+        try {
+            val notif = buildNotification("Starting…")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(NOTIF_ID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+            } else {
+                startForeground(NOTIF_ID, notif)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "startForeground() failed (notification blocked?): ${e.message}")
+            // Recording continues — WakeLock will keep the CPU alive
         }
     }
 
-    private fun updateNotification(text: String) {
-        val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-        nm.notify(NOTIF_ID, buildNotification(text))
+    private fun tryUpdateNotification(text: String) {
+        try {
+            val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+            nm.notify(NOTIF_ID, buildNotification(text))
+        } catch (e: Exception) {
+            Log.w(TAG, "notify() failed: ${e.message}")
+        }
     }
 
     private fun buildNotification(contentText: String): Notification {
         val openApp = PendingIntent.getActivity(
             this, 0,
-            Intent(this, MainActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
-            },
+            Intent(this, MainActivity::class.java).apply { flags = Intent.FLAG_ACTIVITY_SINGLE_TOP },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        val stopAction = PendingIntent.getService(
+        val stopIntent = PendingIntent.getService(
             this, 1,
             Intent(this, RecordingService::class.java).apply { action = ACTION_STOP },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("🎙 Audio Recorder")
             .setContentText(contentText)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(openApp)
-            .addAction(android.R.drawable.ic_media_pause, "Stop", stopAction)
+            .addAction(android.R.drawable.ic_media_pause, "Stop", stopIntent)
             .setOngoing(true)
             .setSilent(true)
             .build()
@@ -258,25 +240,18 @@ class RecordingService : Service() {
         }
     }
 
-    // ─── WakeLock helpers ─────────────────────────────────────────────────────
+    // ── WakeLock ──────────────────────────────────────────────────────────────
 
     private fun acquireWakeLock() {
-        if (wakeLock?.isHeld == false) {
-            // Hold for max 24 h as a safety ceiling
-            wakeLock?.acquire(24 * 60 * 60 * 1000L)
-        }
+        if (wakeLock?.isHeld == false) wakeLock?.acquire(24 * 60 * 60 * 1000L)
     }
 
     private fun releaseWakeLock() {
         if (wakeLock?.isHeld == true) wakeLock?.release()
     }
 
-    // ─── Error broadcast ──────────────────────────────────────────────────────
-
     private fun broadcastError(msg: String) {
-        sendBroadcast(Intent(ACTION_ERROR).apply {
-            putExtra(EXTRA_ERROR_MSG, msg)
-        })
+        sendBroadcast(Intent(ACTION_ERROR).apply { putExtra(EXTRA_ERROR_MSG, msg) })
         stopSelf()
     }
 }

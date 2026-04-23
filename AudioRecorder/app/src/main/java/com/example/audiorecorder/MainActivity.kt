@@ -18,7 +18,6 @@ class MainActivity : AppCompatActivity() {
 
     private var isRecording = false
 
-    // UI
     private lateinit var btnStartStop: Button
     private lateinit var tvStatus: TextView
     private lateinit var tvElapsedTime: TextView
@@ -31,7 +30,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var etPrefix: EditText
     private lateinit var settingsContainer: LinearLayout
 
-    // Elapsed time ticker
     private var elapsedSeconds = 0
     private val uiHandler = Handler(Looper.getMainLooper())
     private val tickRunnable = object : Runnable {
@@ -45,22 +43,22 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // Receives status updates from RecordingService
     private val serviceReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
                 RecordingService.ACTION_RECORDING_STARTED -> {
-                    isRecording = true
-                    updateUI(true)
+                    // Service confirmed it started — update file info
                     tvCurrentFile.text = "📄 ${intent.getStringExtra(RecordingService.EXTRA_FILE_NAME)}"
                     tvFileCount.text = "Segments saved: ${intent.getIntExtra(RecordingService.EXTRA_FILE_COUNT, 0)}"
                 }
                 RecordingService.ACTION_SEGMENT_SAVED -> {
-                    val count = intent.getIntExtra(RecordingService.EXTRA_FILE_COUNT, 0)
-                    tvFileCount.text = "Segments saved: $count"
+                    tvFileCount.text = "Segments saved: ${intent.getIntExtra(RecordingService.EXTRA_FILE_COUNT, 0)}"
                     tvCurrentFile.text = "📄 ${intent.getStringExtra(RecordingService.EXTRA_FILE_NAME)}"
-                    elapsedSeconds = 0 // reset per-segment timer
+                    elapsedSeconds = 0
                 }
                 RecordingService.ACTION_RECORDING_STOPPED -> {
+                    // Service confirmed it stopped
                     isRecording = false
                     updateUI(false)
                     uiHandler.removeCallbacks(tickRunnable)
@@ -96,28 +94,41 @@ class MainActivity : AppCompatActivity() {
         }
 
         btnStartStop.setOnClickListener {
-            if (isRecording) sendStopCommand() else sendStartCommand()
+            if (isRecording) {
+                // Toggle UI immediately — don't wait for service broadcast
+                isRecording = false
+                updateUI(false)
+                uiHandler.removeCallbacks(tickRunnable)
+                sendStopCommand()
+            } else {
+                if (!hasPermissions()) { requestRequiredPermissions(); return@setOnClickListener }
+                // Toggle UI immediately — don't wait for service broadcast
+                isRecording = true
+                updateUI(true)
+                elapsedSeconds = 0
+                uiHandler.post(tickRunnable)
+                sendStartCommand()
+            }
         }
-        
+
         findViewById<Button>(R.id.btnMyRecordings).setOnClickListener {
-            startActivity(android.content.Intent(this, FilesActivity::class.java))
+            startActivity(Intent(this, FilesActivity::class.java))
         }
     }
 
     private fun bindViews() {
-        btnStartStop    = findViewById(R.id.btnStartStop)
-        tvStatus        = findViewById(R.id.tvStatus)
-        tvElapsedTime   = findViewById(R.id.tvElapsedTime)
-        tvCurrentFile   = findViewById(R.id.tvCurrentFile)
-        tvFileCount     = findViewById(R.id.tvFileCount)
-        tvSavePath      = findViewById(R.id.tvSavePath)
-        spinnerInterval = findViewById(R.id.spinnerInterval)
-        spinnerQuality  = findViewById(R.id.spinnerQuality)
-        spinnerChannels = findViewById(R.id.spinnerChannels)
-        etPrefix        = findViewById(R.id.etPrefix)
+        btnStartStop      = findViewById(R.id.btnStartStop)
+        tvStatus          = findViewById(R.id.tvStatus)
+        tvElapsedTime     = findViewById(R.id.tvElapsedTime)
+        tvCurrentFile     = findViewById(R.id.tvCurrentFile)
+        tvFileCount       = findViewById(R.id.tvFileCount)
+        tvSavePath        = findViewById(R.id.tvSavePath)
+        spinnerInterval   = findViewById(R.id.spinnerInterval)
+        spinnerQuality    = findViewById(R.id.spinnerQuality)
+        spinnerChannels   = findViewById(R.id.spinnerChannels)
+        etPrefix          = findViewById(R.id.etPrefix)
         settingsContainer = findViewById(R.id.settingsContainer)
 
-        // Restrict prefix to safe filename chars
         etPrefix.filters = arrayOf(InputFilter { src, _, _, _, _, _ ->
             src.filter { it.isLetterOrDigit() || it == '_' || it == '-' }
         })
@@ -130,29 +141,27 @@ class MainActivity : AppCompatActivity() {
             this, android.R.layout.simple_spinner_dropdown_item,
             arrayOf("5 min", "10 min", "15 min", "20 min", "30 min", "45 min", "60 min")
         ).also { it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
-        spinnerInterval.setSelection(3) // default: 20 min
+        spinnerInterval.setSelection(3)
 
         spinnerQuality.adapter = ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item,
             arrayOf("Low  – 32 kbps / 22 kHz", "Medium – 96 kbps / 44 kHz", "High – 192 kbps / 44 kHz")
         ).also { it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
-        spinnerQuality.setSelection(1) // default: Medium
+        spinnerQuality.setSelection(1)
 
         spinnerChannels.adapter = ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item,
             arrayOf("Mono", "Stereo")
         ).also { it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
-        spinnerChannels.setSelection(1) // default: Stereo
+        spinnerChannels.setSelection(1)
     }
 
     private fun sendStartCommand() {
-        if (!hasPermissions()) { requestRequiredPermissions(); return }
-
         val intervalMin = when (spinnerInterval.selectedItemPosition) {
             0 -> 5; 1 -> 10; 2 -> 15; 3 -> 20; 4 -> 30; 5 -> 45; 6 -> 60; else -> 20
         }
-        val quality  = spinnerQuality.selectedItemPosition  // 0=Low,1=Med,2=High
-        val channels = spinnerChannels.selectedItemPosition + 1 // 1=Mono,2=Stereo
+        val quality  = spinnerQuality.selectedItemPosition
+        val channels = spinnerChannels.selectedItemPosition + 1
         val prefix   = etPrefix.text.toString().trim().ifBlank { "Recording" }
 
         ContextCompat.startForegroundService(this,
@@ -163,9 +172,6 @@ class MainActivity : AppCompatActivity() {
                 putExtra(RecordingService.EXTRA_CHANNELS, channels)
                 putExtra(RecordingService.EXTRA_PREFIX, prefix)
             })
-
-        elapsedSeconds = 0
-        uiHandler.post(tickRunnable)
     }
 
     private fun sendStopCommand() {
@@ -176,9 +182,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateUI(recording: Boolean) {
         if (recording) {
-            btnStartStop.text       = "⏹  Stop Recording"
+            btnStartStop.text = "⏹  Stop Recording"
             btnStartStop.setBackgroundColor(0xFFB71C1C.toInt())
-            tvStatus.text           = "● REC"
+            tvStatus.text = "● REC"
             tvStatus.setTextColor(0xFFFF1744.toInt())
             settingsContainer.alpha = 0.4f
             spinnerInterval.isEnabled = false
@@ -186,13 +192,13 @@ class MainActivity : AppCompatActivity() {
             spinnerChannels.isEnabled = false
             etPrefix.isEnabled        = false
         } else {
-            btnStartStop.text       = "⏺  Start Recording"
+            btnStartStop.text = "⏺  Start Recording"
             btnStartStop.setBackgroundColor(0xFF1B5E20.toInt())
-            tvStatus.text           = "Idle"
+            tvStatus.text = "Idle"
             tvStatus.setTextColor(0xFF888888.toInt())
-            tvCurrentFile.text      = "—"
-            tvElapsedTime.text      = "00:00:00"
-            tvFileCount.text        = "Segments saved: 0"
+            tvCurrentFile.text  = "—"
+            tvElapsedTime.text  = "00:00:00"
+            tvFileCount.text    = "Segments saved: 0"
             settingsContainer.alpha = 1f
             spinnerInterval.isEnabled = true
             spinnerQuality.isEnabled  = true
@@ -225,10 +231,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, results: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, results)
-        if (requestCode == REQUEST_PERMISSIONS) {
-            if (results.any { it != PackageManager.PERMISSION_GRANTED })
-                Toast.makeText(this, "Microphone permission is required.", Toast.LENGTH_LONG).show()
-        }
+        if (requestCode == REQUEST_PERMISSIONS && results.any { it != PackageManager.PERMISSION_GRANTED })
+            Toast.makeText(this, "Microphone permission is required.", Toast.LENGTH_LONG).show()
     }
 
     override fun onDestroy() {
